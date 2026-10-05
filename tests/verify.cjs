@@ -1,0 +1,50 @@
+process.chdir(require('path').resolve(__dirname,'..'));
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const nodes={},listeners={},storage=new Map();let tool;
+function node(s){return nodes[s]??=( {value:s==='#sort'?'expiry':'',hidden:true,innerHTML:'',textContent:'',addEventListener(t,fn){listeners[s+':'+t]=fn},close(){this.open=false},showModal(){this.open=true},reset(){},focus(){}})}
+const context=vm.createContext({console,Date,Math,JSON,String,Number,Promise,Error,setTimeout:()=>0,clearTimeout(){},crypto:{randomUUID:()=> 'test-id'},navigator:{},document:{querySelector:node,addEventListener(){},modelContext:{registerTool(t){tool=t}}},window:{addEventListener(){}},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v)}});
+vm.runInContext(fs.readFileSync('./app.js','utf8'),context);
+assert.equal(tool.name,'list_fridge_ingredients');assert.equal(tool.execute().items.length,0);
+vm.runInContext('openEditor()',context);assert.equal(node('#purchase-date').value,vm.runInContext('localDate()',context));
+node('#purchase-date').value='2026-10-01';
+node('#name').value='<script>alert(1)</script>';node('#category').value='蔬菜';node('#quantity').value='1';node('#unit').value='包';node('#expiry').value='2026-10-08';listeners['#form:submit']({preventDefault(){}});
+assert.equal(JSON.parse(storage.get('fridge-notes-v1')).length,1);assert(nodes['#list'].innerHTML.includes('&lt;script&gt;'));assert.equal(tool.execute().items.length,1);assert.equal(tool.execute().items[0].purchaseDate,'2026-10-01');
+assert.equal(vm.runInContext("valid({id:'a',name:'',category:'蔬菜',quantity:'',expiry:'2026-10-08'})",context),false);
+assert.equal(vm.runInContext("commit([])",context),true);assert.equal(tool.execute().items.length,0);
+node('#name').value='雞蛋';node('#expiry').value='';listeners['#form:submit']({preventDefault(){}});
+assert.equal(tool.execute().items.length,1);assert.equal(tool.execute().items[0].expiry,'');
+assert(nodes['#list'].innerHTML.includes('未設定期限'));assert(!nodes['#list'].innerHTML.includes('NaN'));
+
+vm.runInContext("commit([...items,{id:'dated',name:'青花菜',category:'蔬菜',quantity:'',expiry:'2026-10-08',created:Date.UTC(2026,8,30,12)}])",context);
+assert(nodes['#list'].innerHTML.indexOf('青花菜')<nodes['#list'].innerHTML.indexOf('雞蛋'));
+vm.runInContext('load();render()',context);assert.equal(tool.execute().items.length,2);assert.equal(tool.execute().items.find(i=>i.id==='dated').purchaseDate,'2026-09-30');
+assert.equal(vm.runInContext("validDate('2026-02-30')",context),false);
+node('#purchase-date').value='';listeners['#form:submit']({preventDefault(){}});assert.equal(tool.execute().items.length,2);
+vm.runInContext('openEditor()',context);assert.equal(node('#purchase-date').value,vm.runInContext('localDate()',context));
+assert(!fs.readFileSync('./index.html','utf8').includes('id="expiry" type="date" required'));
+for(const f of ['index.html','style.css','app.js','sw.js','manifest.webmanifest','icon.svg','icon-192.png','icon-512.png'])assert(fs.existsSync('./'+f));
+console.log('Passed: create, persistence, empty state, safe text, invalid input, removal, WebMCP read-back, PWA assets.');
+
+vm.runInContext("commit([{id:'apple',name:'蘋果',category:'水果',quantity:'2 顆',expiry:'',purchaseDate:'2026-10-01'}]);adjustQuantity('apple',-1)",context);
+assert.equal(tool.execute().items[0].amount,1);assert.equal(tool.execute().items[0].unit,'顆');assert.equal(tool.execute().items[0].purchaseDate,'2026-10-01');
+vm.runInContext('load();render()',context);assert.equal(tool.execute().items[0].amount,1);
+vm.runInContext("adjustQuantity('apple',-1)",context);assert.equal(tool.execute().items.length,0);
+listeners['#toast button:click']();assert.equal(tool.execute().items[0].amount,1);
+vm.runInContext("adjustQuantity('apple',1)",context);assert.equal(tool.execute().items[0].amount,2);
+listeners['#toast button:click']();assert.equal(tool.execute().items[0].amount,1);
+assert.equal(vm.runInContext("changeQuantity('apple',-1,'顆')",context),false);
+vm.runInContext("changeQuantity('apple',0.5,'顆');adjustQuantity('apple',-1)",context);assert.equal(tool.execute().items.length,0);
+assert.equal(vm.runInContext("quantityParts({quantity:'半包'})",context),null);
+console.log('Passed quantity migration, decrement, increment, zero removal, undo, persistence, fractional quantity, invalid input.');
+
+vm.runInContext("commit([{id:'edit-test',name:'蘋果',category:'水果',amount:2,unit:'顆',quantity:'2 顆',expiry:'2026-10-12',purchaseDate:'2026-10-01',created:123}]);openEditor('edit-test')",context);
+assert.equal(node('#name').value,'蘋果');assert.equal(node('#quantity').value,2);assert.equal(node('#unit').value,'顆');
+vm.runInContext("stepInput('#quantity',1,0.001)",context);assert.equal(node('#quantity').value,'3');
+vm.runInContext("stepInput('#quantity',-1,0.001)",context);assert.equal(node('#quantity').value,'2');
+node('#name').value='醬油';node('#category').value='調味料';node('#unit').value='瓶';node('#expiry').value='';listeners['#form:submit']({preventDefault(){}});
+assert.equal(tool.execute().items.length,1);assert.equal(tool.execute().items[0].id,'edit-test');assert.equal(tool.execute().items[0].created,123);assert.equal(tool.execute().items[0].category,'調味料');assert.equal(tool.execute().items[0].unit,'瓶');
+vm.runInContext("openEditor('edit-test');setUnit('#unit','小罐')",context);assert.equal(node('#unit').value,'other');assert.equal(node('#unit-custom').hidden,false);
+listeners['#form:submit']({preventDefault(){}});vm.runInContext('load();render()',context);assert.equal(tool.execute().items[0].unit,'小罐');
+vm.runInContext("openEditor();stepInput('#quantity',-1,0.001)",context);assert.equal(node('#quantity').value,'0.001');assert.equal(node('#unit').value,'顆');assert.equal(node('#unit-custom').hidden,true);
+assert(nodes['#categories'].innerHTML.includes('調味料'));assert(nodes['#list'].innerHTML.includes('data-edit="edit-test"'));
+console.log('Passed full editing, stable identity, quantity buttons, common/custom units, seasoning category, persistence.');
